@@ -96,5 +96,47 @@
     "ratio": "0.40\u00d7",
     "yt_url": "https://youtube.com/watch?v=anLZnfSHoXs",
     "category": "Sports"
+  },
+  {
+    "timestamp": "2026-05-06T16:11:52.137597",
+    "mode": "surprise",
+    "title": "Appalachian Burgoo Recipe (OLD-FASHIONED & LOADED!) | Hearty One-Pot Comfort Food",
+    "pred_vpd": 4206.41,
+    "actual_vpd": 3520.0,
+    "video_id": "2xE4AKgan8U",
+    "channel": "Back Porch Cookin' and Reminiscin' ",
+    "subs": 32200,
+    "accuracy": "\u2705 ON TARGET",
+    "ratio": "1.20\u00d7",
+    "yt_url": "https://youtube.com/watch?v=2xE4AKgan8U",
+    "category": "Food"
+  },
+  {
+    "timestamp": "2026-05-06T16:13:08.903175",
+    "mode": "surprise",
+    "title": "MARKO MARKOVI\u0106 BOMBARDERI & BERNARD DEMIRALI \u00a92026 MI FAMILIJA [Official Video 6K] By: G.G.B",
+    "pred_vpd": 3698.99,
+    "actual_vpd": 7191.0,
+    "video_id": "NmwVWh8wnLA",
+    "channel": "Marko Markovic (Official Chanel)",
+    "subs": 19100,
+    "accuracy": "\u2705 ON TARGET",
+    "ratio": "0.51\u00d7",
+    "yt_url": "https://youtube.com/watch?v=NmwVWh8wnLA",
+    "category": "Music"
+  },
+  {
+    "timestamp": "2026-05-06T16:15:24.227597",
+    "mode": "surprise",
+    "title": "DC Vs CSK 48th T20 Live Match Score | Live Score Analysis & Commentary | IPL 2026 Cricket Match",
+    "pred_vpd": 2339.49,
+    "actual_vpd": 40509.0,
+    "video_id": "dtpXx871mtg",
+    "channel": "PJ Cric Live",
+    "subs": 79600,
+    "accuracy": "\u274c OFF",
+    "ratio": "0.06\u00d7",
+    "yt_url": "https://youtube.com/watch?v=dtpXx871mtg",
+    "category": "Sports"
   }
 ]
