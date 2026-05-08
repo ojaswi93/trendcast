@@ -34,10 +34,10 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-TARGET_MEAN = 8.74300812380281
-TARGET_STD  = 2.0089800699907783
+TARGET_MEAN = 7.670568273844549
+TARGET_STD  = 1.6172140104057109
 IG_STEPS    = 30
-MODEL_PATH  = "trendcast_v6_best_model.pth"
+MODEL_PATH  = "v9_abl_flat.pth"
 LOG_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "predictions_log.json")
 
@@ -143,53 +143,156 @@ html,body,[class*="css"]{font-family:'DM Sans',sans-serif;background:var(--dark)
 .stButton>button:hover{opacity:0.85!important;}
 .stTextInput>div>div>input{background:#1A1A1A!important;border:1px solid var(--border)!important;border-radius:4px!important;color:white!important;font-size:15px!important;padding:12px 16px!important;}
 .stTextInput>div>div>input:focus{border-color:var(--yellow)!important;box-shadow:0 0 0 1px var(--yellow)!important;}
+
+.suggestion-card{
+    background:#111111;
+    border:1px solid #222222;
+    border-left:4px solid #FFD600;
+    border-radius:8px;
+    padding:14px 18px;
+    margin-bottom:10px;
+    font-size:13px;
+    color:#DDDDDD;
+    line-height:1.6;
+}
+
+.suggestion-good{
+    border-left:4px solid #4ADE80;
+}
+
+.suggestion-warn{
+    border-left:4px solid #FFD600;
+}
+
+.suggestion-bad{
+    border-left:4px solid #FF3B3B;
+}
 </style>
 """, unsafe_allow_html=True)
-
 
 # ─────────────────────────────────────────────
 # MODEL
 # ─────────────────────────────────────────────
-class TrendCastV6(nn.Module):
+class FlatConcatV9(nn.Module):
+
     def __init__(self):
         super().__init__()
-        self.distilbert = DistilBertModel.from_pretrained('distilbert-base-uncased')
-        for p in self.distilbert.parameters(): p.requires_grad = False
-        for p in self.distilbert.transformer.layer[-1].parameters(): p.requires_grad = True
-        for p in self.distilbert.transformer.layer[-2].parameters(): p.requires_grad = True
-        resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
-        for p in resnet.parameters(): p.requires_grad = False
-        for p in resnet.layer4.parameters(): p.requires_grad = True
-        self.resnet_features = nn.Sequential(*list(resnet.children())[:-1])
-        self.fusion = nn.Sequential(
-            nn.Linear(2816,512), nn.BatchNorm1d(512), nn.ReLU(), nn.Dropout(0.4),
-            nn.Linear(512,256),  nn.BatchNorm1d(256), nn.ReLU(), nn.Dropout(0.3),
-            nn.Linear(256,128),  nn.ReLU(),
+
+        # ── TEXT BACKBONE ─────────────────────
+        self.distilbert = DistilBertModel.from_pretrained(
+            'distilbert-base-uncased'
         )
-        self.reg_head = nn.Linear(128, 1)
+
+        for p in self.distilbert.parameters():
+            p.requires_grad = False
+
+        for p in self.distilbert.transformer.layer[-1].parameters():
+            p.requires_grad = True
+
+        for p in self.distilbert.transformer.layer[-2].parameters():
+            p.requires_grad = True
+
+        # ── IMAGE BACKBONE ────────────────────
+        resnet = models.resnet50(
+            weights=models.ResNet50_Weights.IMAGENET1K_V2
+        )
+
+        for p in resnet.parameters():
+            p.requires_grad = False
+
+        for p in resnet.layer4.parameters():
+            p.requires_grad = True
+
+        self.resnet_features = nn.Sequential(
+            *list(resnet.children())[:-1]
+        )
+
+        # ── PROJECTIONS ───────────────────────
+        self.text_proj = nn.Linear(768, 256)
+        self.img_proj  = nn.Linear(2048, 256)
+
+        # ── FUSION ────────────────────────────
+        self.fusion = nn.Sequential(
+
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Dropout(0.4),
+
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+
+            nn.Linear(128, 64),
+            nn.ReLU(),
+        )
+
+        self.reg_head = nn.Linear(64, 1)
 
     def forward(self, input_ids, attention_mask, image):
-        text_feat = self.distilbert(
-            input_ids=input_ids, attention_mask=attention_mask)[0][:,0,:]
-        img_feat  = self.resnet_features(image).view(image.size(0), -1)
-        return self.reg_head(
-            self.fusion(torch.cat([text_feat, img_feat], dim=1))).squeeze(1)
 
+        # ── TEXT FEATURES ────────────────────
+        hidden = self.distilbert(
+            input_ids=input_ids,
+            attention_mask=attention_mask
+        )[0]
+
+        mask_exp = attention_mask.unsqueeze(-1).float()
+
+        text_feat = (
+            (hidden * mask_exp).sum(1)
+            / mask_exp.sum(1)
+        )
+
+        text_proj = self.text_proj(text_feat)
+
+        # ── IMAGE FEATURES ───────────────────
+        img_feat = self.resnet_features(image).view(
+            image.size(0),
+            -1
+        )
+
+        img_proj = self.img_proj(img_feat)
+
+        # ── FLAT CONCAT FUSION ───────────────
+        fused = self.fusion(
+            torch.cat([text_proj, img_proj], dim=1)
+        )
+
+        return self.reg_head(fused).squeeze(1)
 
 @st.cache_resource
 def load_model():
-    device    = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
-    model     = TrendCastV6().to(device)
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+
+    device = torch.device(
+        'cuda' if torch.cuda.is_available() else 'cpu'
+    )
+
+    tokenizer = DistilBertTokenizer.from_pretrained(
+        'distilbert-base-uncased'
+    )
+
+    model = FlatConcatV9().to(device)
+
+    state_dict = torch.load(
+        MODEL_PATH,
+        map_location=device
+    )
+
+    model.load_state_dict(
+        state_dict,
+        strict=False
+    )
+
     model.eval()
+
     return model, tokenizer, device
 
 val_tfm = transforms.Compose([
     transforms.Resize((224,224)), transforms.ToTensor(),
     transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
 ])
-
 
 # ─────────────────────────────────────────────
 # GRAD-CAM
@@ -226,54 +329,442 @@ def make_heatmap_fig(pil_img, cam):
     axes[1].imshow(bl);      axes[1].set_title('Grad-CAM  (red = model focus)',color='#FFD600',fontsize=10,pad=8)
     plt.tight_layout(pad=1.5); return fig
 
-
 # ─────────────────────────────────────────────
 # INTEGRATED GRADIENTS
 # ─────────────────────────────────────────────
 def integrated_gradients(model, tokenizer, ids, mask, image, device):
+
     model.eval()
-    el = model.distilbert.embeddings.word_embeddings
-    ae = el(ids).detach(); be = el(torch.zeros_like(ids)).detach()
-    gs = torch.zeros_like(ae)
-    for a in torch.linspace(0,1,IG_STEPS).to(device):
-        interp = (be+a*(ae-be)).requires_grad_(True)
-        out    = model.distilbert(attention_mask=mask,inputs_embeds=interp)
-        cls    = out.last_hidden_state[:,0,:]
-        imf    = model.resnet_features(image).view(image.size(0),-1).detach()
-        pred   = model.reg_head(model.fusion(torch.cat([cls,imf],dim=1))).squeeze(1)
-        gs    += torch.autograd.grad(pred.sum(),interp)[0].detach()
-    attr   = ((gs/IG_STEPS)*(ae-be)).sum(dim=-1).squeeze(0).cpu().numpy()
-    tokens = tokenizer.convert_ids_to_tokens(ids.squeeze(0).cpu().numpy())
+
+    embed_layer = model.distilbert.embeddings.word_embeddings
+
+    actual_embeds = embed_layer(ids).detach()
+
+    base_embeds = embed_layer(
+        torch.zeros_like(ids)
+    ).detach()
+
+    grad_sum = torch.zeros_like(actual_embeds)
+
+    alphas = torch.linspace(
+        0,
+        1,
+        IG_STEPS
+    ).to(device)
+
+    for alpha in alphas:
+
+        interp = (
+            base_embeds
+            + alpha * (actual_embeds - base_embeds)
+        ).requires_grad_(True)
+
+        db_out = model.distilbert(
+            attention_mask=mask,
+            inputs_embeds=interp
+        )
+
+        hidden = db_out.last_hidden_state
+
+        mask_exp = mask.unsqueeze(-1).float()
+
+        text_feat = (
+            (hidden * mask_exp).sum(1)
+            / mask_exp.sum(1)
+        )
+
+        text_proj = model.text_proj(text_feat)
+
+        img_feat = model.resnet_features(image).view(
+            image.size(0),
+            -1
+        ).detach()
+
+        img_proj = model.img_proj(img_feat)
+
+        fused = model.fusion(
+            torch.cat(
+                [text_proj, img_proj],
+                dim=1
+            )
+        )
+
+        pred = model.reg_head(fused).squeeze(1)
+
+        grad = torch.autograd.grad(
+            pred.sum(),
+            interp
+        )[0]
+
+        grad_sum += grad.detach()
+
+    avg_grads = grad_sum / IG_STEPS
+
+    attr = (
+        (avg_grads * (actual_embeds - base_embeds))
+        .sum(dim=-1)
+        .squeeze(0)
+        .cpu()
+        .numpy()
+    )
+
+    tokens = tokenizer.convert_ids_to_tokens(
+        ids.squeeze(0).cpu().numpy()
+    )
+
     return attr, tokens
 
 def make_attr_fig(attr, tokens):
-    valid = [(t.replace('##',''),a) for t,a in zip(tokens,attr)
-             if t not in ['[PAD]','[CLS]','[SEP]','<pad>']]
-    if not valid: return None
-    labs = [t for t,_ in valid]; vals = np.array([a for _,a in valid])
-    norm = Normalize(vmin=vals.min(),vmax=vals.max())
-    cols = [plt.cm.RdYlGn(norm(v)) for v in vals]
-    fig,ax = plt.subplots(figsize=(8,max(3.5,len(labs)*0.38)))
-    fig.patch.set_facecolor('#111111'); ax.set_facecolor('#111111')
-    ax.barh(range(len(labs)),vals,color=cols,edgecolor='#222',linewidth=0.5)
-    ax.set_yticks(range(len(labs))); ax.set_yticklabels(labs,fontsize=9,color='#CCC')
-    ax.axvline(0,color='#444',linewidth=1,linestyle='--')
-    ax.set_xlabel('Attribution Score',fontsize=9,color='#888')
-    ax.tick_params(colors='#666',labelsize=8)
-    for sp in ax.spines.values(): sp.set_edgecolor('#333')
-    sm = ScalarMappable(cmap=plt.cm.RdYlGn,norm=norm); sm.set_array([])
-    cb = plt.colorbar(sm,ax=ax,fraction=0.03,pad=0.04)
-    cb.ax.yaxis.set_tick_params(color='#666'); cb.outline.set_edgecolor('#333')
-    plt.setp(cb.ax.yaxis.get_ticklabels(),color='#888',fontsize=8)
-    plt.tight_layout(); return fig
+
+    valid = [
+        (t.replace('##',''), a)
+        for t, a in zip(tokens, attr)
+        if t not in ['[PAD]','[CLS]','[SEP]','<pad>']
+    ]
+
+    if not valid:
+        return None
+
+    labels = [t for t, _ in valid]
+    vals   = np.array([a for _, a in valid])
+
+    norm   = Normalize(
+        vmin=vals.min(),
+        vmax=vals.max()
+    )
+
+    colors = [
+        plt.cm.RdYlGn(norm(v))
+        for v in vals
+    ]
+
+    fig_h = max(3.5, len(labels) * 0.38)
+
+    fig, ax = plt.subplots(
+        figsize=(8, fig_h)
+    )
+
+    fig.patch.set_facecolor('#111111')
+    ax.set_facecolor('#111111')
+
+    ax.barh(
+        range(len(labels)),
+        vals,
+        color=colors,
+        edgecolor='#222',
+        linewidth=0.5
+    )
+
+    ax.set_yticks(range(len(labels)))
+
+    ax.set_yticklabels(
+        labels,
+        fontsize=9,
+        color='#CCCCCC'
+    )
+
+    ax.axvline(
+        0,
+        color='#444',
+        linewidth=1,
+        linestyle='--'
+    )
+
+    ax.set_xlabel(
+        'Attribution Score',
+        fontsize=9,
+        color='#888'
+    )
+
+    ax.tick_params(
+        colors='#666',
+        labelsize=8
+    )
+
+    for spine in ax.spines.values():
+        spine.set_edgecolor('#333')
+
+    sm = ScalarMappable(
+        cmap=plt.cm.RdYlGn,
+        norm=norm
+    )
+
+    sm.set_array([])
+
+    cb = plt.colorbar(
+        sm,
+        ax=ax,
+        fraction=0.03,
+        pad=0.04
+    )
+
+    cb.ax.yaxis.set_tick_params(color='#666')
+
+    cb.outline.set_edgecolor('#333')
+
+    plt.setp(
+        cb.ax.yaxis.get_ticklabels(),
+        color='#888',
+        fontsize=8
+    )
+
+    plt.tight_layout()
+
+    return fig
 
 def top_tokens(attr, tokens, n=3):
-    valid = [(t.replace('##',''),a) for t,a in zip(tokens,attr)
-             if t not in ['[PAD]','[CLS]','[SEP]','<pad>']]
-    valid.sort(key=lambda x: x[1], reverse=True)
-    return [t for t,a in valid if a>0][:n],[t for t,a in valid if a<0][:n]
 
+    valid = []
 
+    for t, a in zip(tokens, attr):
+
+        if t in ['[PAD]', '[CLS]', '[SEP]', '<pad>']:
+            continue
+
+        clean = t.replace('##', '')
+
+        if len(clean) < 3:
+            continue
+
+        valid.append((clean, a))
+
+    pos_sorted = sorted(valid, key=lambda x: x[1], reverse=True)
+    neg_sorted = sorted(valid, key=lambda x: x[1])
+
+    pos = [t for t, a in pos_sorted if a > 0][:n]
+    neg = [t for t, a in neg_sorted if a < 0][:n]
+
+    return pos, neg
+
+# ─────────────────────────────────────────────
+# AI OPTIMIZATION + ANALYSIS ENGINE
+# ─────────────────────────────────────────────
+def generate_ai_suggestions(
+    title,
+    pred_vpd,
+    pos_words,
+    neg_words,
+    cam,
+    attr,
+    tokens,
+    actual_vpd=None
+):
+
+    suggestions = []
+
+    title_lower = title.lower()
+
+    # ─────────────────────────────────────────
+    # MODEL-DRIVEN TITLE STRENGTH ANALYSIS
+    # ─────────────────────────────────────────
+
+    valid_attr = [
+        abs(a)
+        for t, a in zip(tokens, attr)
+        if t not in ['[PAD]', '[CLS]', '[SEP]', '<pad>']
+    ]
+
+    if len(valid_attr) > 0:
+
+        top_strength = np.mean(
+            sorted(valid_attr, reverse=True)[:5]
+        )
+        attr_std = np.std(valid_attr)
+        strength_ratio = top_strength / (attr_std + 1e-6)
+        # weak title signal
+        if strength_ratio< 1.2:
+
+            suggestions.append((
+                "bad",
+                'Title lacks strong high-impact keywords.'
+            ))
+
+            suggestions.append((
+                "warn",
+                'Consider adding stronger emotional, challenge, curiosity, or outcome-focused wording.'
+            ))
+
+        # medium strength
+        elif strength_ratio < 2.0:
+
+            suggestions.append((
+                "warn",
+                'Title signal strength appears moderate.'
+            ))
+
+            suggestions.append((
+                "warn",
+                'More emotionally weighted keywords may improve click potential.'
+            ))
+
+        # strong title
+        else:
+
+            suggestions.append((
+                "good",
+                'Title contains strong attention-driving language patterns.'
+            ))
+
+    # ─────────────────────────────────────────
+    # POSITIVE / NEGATIVE TOKENS
+    # ─────────────────────────────────────────
+
+    if len(pos_words) > 0:
+
+        suggestions.append((
+            "good",
+            f'Strong keywords detected: {", ".join(pos_words)}.'
+        ))
+
+    if len(neg_words) > 0:
+
+        suggestions.append((
+            "bad",
+            f'Words reducing prediction score: {", ".join(neg_words)}.'
+        ))
+
+    # ─────────────────────────────────────────
+    # TITLE LENGTH ANALYSIS
+    # ─────────────────────────────────────────
+
+    wc = len(title.split())
+
+    if wc < 4:
+
+        suggestions.append((
+            "warn",
+            'Title may be too short. Add more context or curiosity.'
+        ))
+
+    elif wc > 14:
+
+        suggestions.append((
+            "warn",
+            'Title may be too long. Shorter titles are often more clickable.'
+        ))
+
+    # ─────────────────────────────────────────
+    # THUMBNAIL ANALYSIS
+    # ─────────────────────────────────────────
+
+    center_focus = np.mean(cam[80:144, 80:144])
+
+    left_focus = np.mean(cam[:, :70])
+
+    right_focus = np.mean(cam[:, 154:])
+
+    overall_focus = np.mean(cam)
+    focus_std = max(np.std(cam), 1e-6)
+
+    if center_focus < 0.20:
+
+        suggestions.append((
+            "bad",
+            'Thumbnail lacks a strong central focal point.'
+        ))
+
+        suggestions.append((
+            "warn",
+            'Consider larger faces, objects, or bold text near the center.'
+        ))
+
+    if abs(left_focus - right_focus) > 0.15:
+
+        suggestions.append((
+            "warn",
+            'Visual attention appears uneven across the thumbnail.'
+        ))
+
+    if overall_focus < (focus_std * 0.85):
+
+        suggestions.append((
+            "bad",
+            'Thumbnail may need stronger contrast or clearer subject separation.'
+        ))
+
+    # ─────────────────────────────────────────
+    # PRE-PUBLICATION ANALYSIS
+    # ─────────────────────────────────────────
+
+    if actual_vpd is None:
+
+        if pred_vpd < 10_000:
+
+            suggestions.append((
+                "bad",
+                'Current packaging shows weak click-driving potential.'
+            ))
+
+        elif pred_vpd < 100_000:
+
+            suggestions.append((
+                "warn",
+                'Packaging has moderate potential but could be optimized further.'
+            ))
+
+        else:
+
+            suggestions.append((
+                "good",
+                'Packaging signals appear strong overall.'
+            ))
+
+    # ─────────────────────────────────────────
+    # POST-PUBLICATION ANALYSIS
+    # ─────────────────────────────────────────
+
+    else:
+
+        ratio = pred_vpd / max(actual_vpd, 1)
+
+        if ratio < 0.5:
+
+            suggestions.append((
+                "good",
+                'Video significantly outperformed model expectations.'
+            ))
+
+            suggestions.append((
+                "warn",
+                'Possible external virality factors: trends, audience momentum, or creator influence.'
+            ))
+
+        elif ratio > 2.0:
+
+            suggestions.append((
+                "bad",
+                'Packaging appeared strong but audience response was weaker than expected.'
+            ))
+
+            suggestions.append((
+                "warn",
+                'Possible mismatch between click appeal and viewer retention.'
+            ))
+
+        else:
+
+            suggestions.append((
+                "good",
+                'Prediction aligned closely with actual audience response.'
+            ))
+
+    # ─────────────────────────────────────────
+    # REMOVE DUPLICATES
+    # ─────────────────────────────────────────
+
+    unique = []
+
+    seen = set()
+
+    for level, text in suggestions:
+
+        if text not in seen:
+
+            unique.append((level, text))
+
+            seen.add(text)
+
+    return unique[:8]
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
@@ -302,7 +793,6 @@ def accuracy_info(pred, actual):
     if 0.25<=r<=4.0:  return "⚠️ CLOSE",   "acc-ok",  "#FFD600", ratio_str
     return "❌ OFF",  "acc-bad","#FF3B3B", ratio_str
 
-
 # ─────────────────────────────────────────────
 # PREDICTION LOG — robust file-based
 # ─────────────────────────────────────────────
@@ -328,7 +818,6 @@ def append_prediction(entry):
         os.replace(tmp, LOG_FILE)   # atomic on all platforms
     except Exception as e:
         st.warning(f"Could not save prediction log: {e}")
-
 
 # ─────────────────────────────────────────────
 # YOUTUBE API — KEY ROTATOR
@@ -362,7 +851,6 @@ class KeyRotator:
 
 @st.cache_resource
 def get_rotator(): return KeyRotator(API_KEYS)
-
 
 # ─────────────────────────────────────────────
 # YOUTUBE FETCH
@@ -458,7 +946,6 @@ def download_thumbnail(url):
         return Image.open(io.BytesIO(r.content)).convert('RGB')
     except: return None
 
-
 # ─────────────────────────────────────────────
 # SHARED PREDICT + RENDER
 # ─────────────────────────────────────────────
@@ -473,9 +960,9 @@ def run_prediction(model, tokenizer, device, title, pil_img):
         pred_norm = model(ids, mask, img_t).item()
     return ids, mask, img_t, float(np.expm1(pred_norm*TARGET_STD+TARGET_MEAN))
 
-
 def render_results(model, tokenizer, device, gradcam_obj,
                    ids, mask, img_t, pil_img, pred_vpd,
+                   title,
                    actual_vpd=None, video_info=None):
 
     tier, tier_cls = get_tier(pred_vpd)
@@ -548,27 +1035,77 @@ def render_results(model, tokenizer, device, gradcam_obj,
     st.markdown('<br>', unsafe_allow_html=True)
     st.markdown('<div class="section-header">EXPLAINABILITY</div>',
                 unsafe_allow_html=True)
+    cam, _ = gradcam_obj.generate(ids, mask, img_t)
     tab1,tab2 = st.tabs(['📸 Thumbnail · Grad-CAM',
                           '📝 Title · Integrated Gradients'])
     with tab1:
         with st.spinner('Generating Grad-CAM...'):
-            cam,_ = gradcam_obj.generate(ids,mask,img_t)
+            
             fig_c = make_heatmap_fig(pil_img,cam)
             st.pyplot(fig_c,use_container_width=True); plt.close(fig_c)
         st.caption('Red/warm = regions the model weighted heavily.')
     with tab2:
         with st.spinner('Running Integrated Gradients (~5s)...'):
-            attr,tokens = integrated_gradients(model,tokenizer,ids,mask,img_t,device)
-            pos_w,neg_w = top_tokens(attr,tokens)
+            attr, tokens = integrated_gradients(
+                model,
+                tokenizer,
+                ids,
+                mask,
+                img_t,
+                device
+            )
+
+            pos_w, neg_w = top_tokens(attr, tokens)
+
+            ai_suggestions = generate_ai_suggestions(
+                title=title,
+                pred_vpd=pred_vpd,
+                pos_words=pos_w,
+                neg_words=neg_w,
+                cam=cam,
+                attr=attr,
+                tokens=tokens,
+                actual_vpd=actual_vpd
+            )
+
             chips = "".join(
-                [f'<span class="insight-chip chip-pos">↑ {w}</span>' for w in pos_w]+
-                [f'<span class="insight-chip chip-neg">↓ {w}</span>' for w in neg_w])
-            st.markdown(chips,unsafe_allow_html=True)
-            fig_ig = make_attr_fig(attr,tokens)
-            if fig_ig: st.pyplot(fig_ig,use_container_width=True); plt.close(fig_ig)
+                [f'<span class="insight-chip chip-pos">↑ {w}</span>' for w in pos_w] +
+                [f'<span class="insight-chip chip-neg">↓ {w}</span>' for w in neg_w]
+            )
+
+            st.markdown(chips, unsafe_allow_html=True)
+
+            st.markdown('<br>', unsafe_allow_html=True)
+
+            st.markdown(
+                '<div class="section-header">AI OPTIMIZATION SUGGESTIONS</div>',
+                unsafe_allow_html=True
+            )
+
+            for level, text in ai_suggestions:
+                css_class = {
+                    "good": "suggestion-good",
+                    "warn": "suggestion-warn",
+                    "bad": "suggestion-bad"
+                }.get(level, "suggestion-warn")
+
+                st.markdown(
+                    f'''
+                    <div class="suggestion-card {css_class}">
+                        {text}
+                    </div>
+                    ''',
+                    unsafe_allow_html=True
+                )
+
+            fig_ig = make_attr_fig(attr, tokens)
+
+            if fig_ig:
+                st.pyplot(fig_ig, use_container_width=True)
+                plt.close(fig_ig)
+
         st.caption('Green = pushed score up · Red = pushed score down')
-
-
+   
 # ─────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────
@@ -578,7 +1115,7 @@ with st.sidebar:
                 letter-spacing:3px;color:white;margin-bottom:4px;">TRENDCAST</div>
     <div style="font-family:'JetBrains Mono',monospace;font-size:9px;
                 color:#FFD600;letter-spacing:2px;margin-bottom:32px;">
-        V6 · MIT-WPU 2026</div>
+        V9 · MIT-WPU 2026</div>
     """, unsafe_allow_html=True)
 
     page = st.radio("nav",["Predictor","Accuracy Tracker"],
@@ -597,7 +1134,6 @@ with st.sidebar:
         color:#444;letter-spacing:1px;margin-top:8px;">
         LOGGED PREDICTIONS: {log_count}</div>""", unsafe_allow_html=True)
 
-
 # ─────────────────────────────────────────────
 # PAGE 1 — PREDICTOR
 # ─────────────────────────────────────────────
@@ -606,16 +1142,16 @@ if page == "Predictor":
     st.markdown("""
     <div style="display:flex;align-items:baseline;gap:16px;margin-bottom:4px;">
         <p class="hero-title">TRENDCAST</p>
-        <span class="hero-tag">V6 · Pre-Publication</span>
+        <span class="hero-tag">V9 · Flat Concat</span>
     </div>
     <p class="hero-sub">
         Predict video virality before you publish — title + thumbnail only.<br>
-        DistilBERT + ResNet-50 multimodal fusion · R²=0.42
+        DistilBERT + ResNet-50 Flat Concat Fusion · R²=0.401
     </p>
     <div class="divider"></div>
     """, unsafe_allow_html=True)
 
-    with st.spinner('Loading TrendCast V6...'):
+    with st.spinner('Loading TrendCast V9 Flat Concat...'):
         try:
             model, tokenizer, device = load_model()
             gradcam_obj = GradCAM(model)
@@ -650,8 +1186,18 @@ if page == "Predictor":
                     with st.spinner("Analysing..."):
                         ids,mask,img_t,pred_vpd = run_prediction(
                             model,tokenizer,device,title,pil_manual)
-                    render_results(model,tokenizer,device,gradcam_obj,
-                                   ids,mask,img_t,pil_manual,pred_vpd)
+                    render_results(
+                        model,
+                        tokenizer,
+                        device,
+                        gradcam_obj,
+                        ids,
+                        mask,
+                        img_t,
+                        pil_manual,
+                        pred_vpd,
+                        title=title
+                    )
                     append_prediction({
                         "timestamp":  datetime.datetime.utcnow().isoformat(),
                         "mode":       "manual",
@@ -735,11 +1281,19 @@ if page == "Predictor":
                             })
 
                             render_results(
-                                model,tokenizer,device,gradcam_obj,
-                                ids,mask,img_t,pil_s,pred_vpd,
+                                model,
+                                tokenizer,
+                                device,
+                                gradcam_obj,
+                                ids,
+                                mask,
+                                img_t,
+                                pil_s,
+                                pred_vpd,
+                                title=video_info['title'],
                                 actual_vpd=video_info['actual_vpd'],
-                                video_info=video_info)
-
+                                video_info=video_info
+                            )
 
 # ─────────────────────────────────────────────
 # PAGE 2 — ACCURACY TRACKER
@@ -806,71 +1360,134 @@ elif page == "Accuracy Tracker":
         st.markdown('<br>',unsafe_allow_html=True)
 
         # ── Bar chart — grouped by category ─────────────────
-        st.markdown('<div class="section-header">PREDICTED VS ACTUAL VPD — BY CATEGORY</div>',
-                    unsafe_allow_html=True)
+        # ── CATEGORY ACCURACY SUMMARY CHART ─────────────────
+        st.markdown(
+                '<div class="section-header">CATEGORY-WISE PREDICTION ACCURACY</div>',
+                unsafe_allow_html=True
+            )
 
-        from matplotlib.patches import Patch
 
-        # Group entries by category
-        cats_present = sorted(set(e.get("category","Any") for e in surprise_log))
-        n_cats = len(cats_present)
-        fig, axes = plt.subplots(
-            n_cats, 1,
-            figsize=(12, max(3.5, n_cats * 3.5)),
-            squeeze=False
-        )
+
+        cats_present = sorted(set(e.get("category", "Any") for e in surprise_log))
+
+        on_target_counts = []
+        close_counts = []
+        off_counts = []
+
+        for cat in cats_present:
+
+                cat_entries = [
+                    e for e in surprise_log
+                    if e.get("category", "Any") == cat
+                ]
+
+                on_t = 0
+                close = 0
+                off = 0
+
+                for e in cat_entries:
+
+                    r = e['pred_vpd'] / max(e['actual_vpd'], 1)
+
+                    if 0.5 <= r <= 2.0:
+                        on_t += 1
+
+                    elif 0.25 <= r <= 4.0:
+                        close += 1
+
+                    else:
+                        off += 1
+
+                on_target_counts.append(on_t)
+                close_counts.append(close)
+                off_counts.append(off)
+
+            # Plotting
+        x = np.arange(len(cats_present))
+        w = 0.25
+
+        fig, ax = plt.subplots(figsize=(12, 5))
         fig.patch.set_facecolor('#111111')
+        ax.set_facecolor('#111111')
 
-        for ax_idx, cat_name in enumerate(cats_present):
-            ax = axes[ax_idx][0]
-            ax.set_facecolor('#111111')
+        bars1 = ax.bar(
+                x - w,
+                on_target_counts,
+                width=w,
+                color='#4ADE80',
+                label='On Target'
+            )
 
-            cat_entries = [e for e in surprise_log if e.get("category","Any")==cat_name]
-            preds_c   = [e['pred_vpd']   for e in cat_entries]
-            actuals_c = [e['actual_vpd'] for e in cat_entries]
-            xlabs_c   = [e['title'][:30]+"…" if len(e['title'])>30
-                         else e['title'] for e in cat_entries]
-            n_c = len(preds_c)
+        bars2 = ax.bar(
+                x,
+                close_counts,
+                width=w,
+                color='#FFD600',
+                label='Close'
+            )
 
-            bar_colors = []
-            for e in cat_entries:
-                r = e['pred_vpd']/max(e['actual_vpd'],1)
-                if 0.5<=r<=2.0:    bar_colors.append('#4ADE80')
-                elif 0.25<=r<=4.0: bar_colors.append('#FFD600')
-                else:               bar_colors.append('#FF3B3B')
+        bars3 = ax.bar(
+                x + w,
+                off_counts,
+                width=w,
+                color='#FF3B3B',
+                label='Off'
+            )
 
-            x = np.arange(n_c)
-            ax.bar(x-0.2, preds_c,   width=0.38, color=bar_colors, alpha=0.9)
-            ax.bar(x+0.2, actuals_c, width=0.38, color='#FFFFFF',  alpha=0.2)
+            # Labels on bars
+        for bars in [bars1, bars2, bars3]:
+                for b in bars:
+                    h = b.get_height()
+                    ax.text(
+                        b.get_x() + b.get_width()/2,
+                        h + 0.05,
+                        str(int(h)),
+                        ha='center',
+                        fontsize=8,
+                        color='white'
+                    )
 
-            for i,(p,a) in enumerate(zip(preds_c, actuals_c)):
-                ax.text(i-0.2, p*1.02,  fmt(p), ha='center', va='bottom',
-                        fontsize=7, color='#CCC')
-                ax.text(i+0.2, a*1.02, fmt(a), ha='center', va='bottom',
-                        fontsize=7, color='#888')
+        ax.set_xticks(x)
+        ax.set_xticklabels(
+                cats_present,
+                fontsize=10,
+                color='#CCCCCC'
+            )
 
-            ax.set_xticks(x)
-            ax.set_xticklabels(xlabs_c, rotation=30, ha='right', fontsize=7, color='#888')
-            ax.set_ylabel('vpd', fontsize=8, color='#888')
-            ax.set_title(f"  {cat_name}  ({n_c} prediction{'s' if n_c!=1 else ''})",
-                         color='#FFD600', fontsize=9, loc='left',
-                         fontfamily='monospace', pad=6)
-            ax.tick_params(colors='#555')
-            for sp in ax.spines.values(): sp.set_edgecolor('#2a2a2a')
-            ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+        ax.set_ylabel(
+                "Number of Predictions",
+                fontsize=10,
+                color='#AAAAAA'
+            )
 
-        # Shared legend at bottom
-        legend_els = [
-            Patch(facecolor='#4ADE80', label='Predicted — On Target (within 2×)'),
-            Patch(facecolor='#FFD600', label='Predicted — Close (within 4×)'),
-            Patch(facecolor='#FF3B3B', label='Predicted — Off (>4×)'),
-            Patch(facecolor='#FFFFFF', alpha=0.2, label='Actual'),
-        ]
-        fig.legend(handles=legend_els, fontsize=8, loc='lower center',
-                   ncol=4, facecolor='#1a1a1a', edgecolor='#333',
-                   labelcolor='#aaa', bbox_to_anchor=(0.5, -0.02))
-        plt.tight_layout(rect=[0, 0.04, 1, 1])
-        st.pyplot(fig, use_container_width=True); plt.close(fig)
+        ax.set_title(
+                "Prediction Accuracy by Category",
+                fontsize=14,
+                color='#FFD600',
+                pad=15
+            )
+
+        ax.tick_params(colors='#666')
+
+        for sp in ax.spines.values():
+                sp.set_edgecolor('#2a2a2a')
+
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+        legend = ax.legend(
+                facecolor='#1a1a1a',
+                edgecolor='#333',
+                fontsize=9
+            )
+
+        for text in legend.get_texts():
+                text.set_color('#CCCCCC')
+
+        plt.tight_layout()
+
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
 
         st.markdown('<br>',unsafe_allow_html=True)
 
@@ -928,16 +1545,18 @@ elif page == "Accuracy Tracker":
                            file_name="trendcast_predictions.csv",
                            mime="text/csv")
 
-# ── Footer ────────────────────────────────────────────────────
-st.markdown('<br><br>',unsafe_allow_html=True)
-st.markdown("""
-<div style="border-top:1px solid #1a1a1a;padding-top:16px;
-            display:flex;justify-content:space-between;">
-    <span style="font-family:'JetBrains Mono',monospace;font-size:9px;
-                 color:#2a2a2a;letter-spacing:2px;">
-        TRENDCAST V6 · MIT-WPU CAPSTONE 2026 · GROUP 31</span>
-    <span style="font-family:'JetBrains Mono',monospace;font-size:9px;
-                 color:#2a2a2a;letter-spacing:1px;">
-        DistilBERT + ResNet-50 · R²=0.42</span>
+st.markdown("<br><br>", unsafe_allow_html=True)
+
+footer_html = """
+<div style="border-top:1px solid #1a1a1a; padding-top:16px; display:flex; justify-content:space-between;">
+    <span style="font-family:'JetBrains Mono', monospace; font-size:9px; color:#2a2a2a; letter-spacing:2px;">
+        TRENDCAST V9 · MIT-WPU CAPSTONE 2026 · GROUP 31
+    </span>
+    <span style="font-family:'JetBrains Mono', monospace; font-size:9px; color:#2a2a2a; letter-spacing:1px;">
+        Flat Concat Fusion · DistilBERT + ResNet50
+    </span>
 </div>
-""", unsafe_allow_html=True)
+"""
+
+st.markdown(footer_html, unsafe_allow_html=True)
+
