@@ -1,4 +1,16 @@
-*.pth
+# Virtual environment
 venv/
+
+# Python cache
 __pycache__/
+*.pyc
+
+# Environment variables
 .env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Streamlit secrets (optional)
+.streamlit/secrets.toml
