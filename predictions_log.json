@@ -1248,5 +1248,19 @@
     "video_id": null,
     "channel": null,
     "subs": null
+  },
+  {
+    "timestamp": "2026-05-08T15:53:54.643527",
+    "mode": "surprise",
+    "title": "Minimalist Packing for 3 Years of Travel With One Suitcase | 8 Simple Rules",
+    "pred_vpd": 1624.7,
+    "actual_vpd": 2714.0,
+    "video_id": "7K0UCWFcxdI",
+    "channel": "Queen of DC",
+    "subs": 12800,
+    "accuracy": "\u2705 ON TARGET",
+    "ratio": "0.60\u00d7",
+    "yt_url": "https://youtube.com/watch?v=7K0UCWFcxdI",
+    "category": "Travel"
   }
 ]
