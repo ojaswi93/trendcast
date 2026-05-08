@@ -271,30 +271,35 @@ def top_tokens(attr, tokens, n=3):
     return pos, neg
 
 def generate_ai_suggestions(title, pred_vpd, pos_words, neg_words, cam, attr, tokens, actual_vpd=None):
-    suggestions = []
+    title_sug = []
+    thumb_sug = []
+    perf_sug = []
+    
     title_lower = title.lower()
     valid_attr = [abs(a) for t, a in zip(tokens, attr) if t not in ['[PAD]', '[CLS]', '[SEP]', '<pad>']]
     
+    # ── TITLE INSIGHTS ─────────────────────────────────────────
     if len(valid_attr) > 0:
         top_strength = np.mean(sorted(valid_attr, reverse=True)[:5])
         attr_std = np.std(valid_attr)
         strength_ratio = top_strength / (attr_std + 1e-6)
         if strength_ratio < 1.2:
-            suggestions.append(("bad", 'Title lacks strong high-impact keywords.'))
-            suggestions.append(("warn", 'Consider adding stronger emotional, challenge, curiosity, or outcome-focused wording.'))
+            title_sug.append(("bad", 'Title lacks strong high-impact keywords.'))
+            title_sug.append(("warn", 'Consider adding stronger emotional, challenge, curiosity, or outcome-focused wording.'))
         elif strength_ratio < 2.0:
-            suggestions.append(("warn", 'Title signal strength appears moderate.'))
-            suggestions.append(("warn", 'More emotionally weighted keywords may improve click potential.'))
+            title_sug.append(("warn", 'Title signal strength appears moderate.'))
+            title_sug.append(("warn", 'More emotionally weighted keywords may improve click potential.'))
         else:
-            suggestions.append(("good", 'Title contains strong attention-driving language patterns.'))
+            title_sug.append(("good", 'Title contains strong attention-driving language patterns.'))
 
-    if len(pos_words) > 0: suggestions.append(("good", f'Strong keywords detected: {", ".join(pos_words)}.'))
-    if len(neg_words) > 0: suggestions.append(("bad", f'Words reducing prediction score: {", ".join(neg_words)}.'))
+    if len(pos_words) > 0: title_sug.append(("good", f'Strong keywords detected: {", ".join(pos_words)}.'))
+    if len(neg_words) > 0: title_sug.append(("bad", f'Words reducing prediction score: {", ".join(neg_words)}.'))
 
     wc = len(title.split())
-    if wc < 4: suggestions.append(("warn", 'Title may be too short. Add more context or curiosity.'))
-    elif wc > 14: suggestions.append(("warn", 'Title may be too long. Shorter titles are often more clickable.'))
+    if wc < 4: title_sug.append(("warn", 'Title may be too short. Add more context or curiosity.'))
+    elif wc > 14: title_sug.append(("warn", 'Title may be too long. Shorter titles are often more clickable.'))
 
+    # ── THUMBNAIL INSIGHTS ─────────────────────────────────────
     center_focus = np.mean(cam[80:144, 80:144])
     left_focus = np.mean(cam[:, :70])
     right_focus = np.mean(cam[:, 154:])
@@ -302,33 +307,41 @@ def generate_ai_suggestions(title, pred_vpd, pos_words, neg_words, cam, attr, to
     focus_std = max(np.std(cam), 1e-6)
 
     if center_focus < 0.20:
-        suggestions.append(("bad", 'Thumbnail lacks a strong central focal point.'))
-        suggestions.append(("warn", 'Consider larger faces, objects, or bold text near the center.'))
-    if abs(left_focus - right_focus) > 0.15: suggestions.append(("warn", 'Visual attention appears uneven across the thumbnail.'))
-    if overall_focus < (focus_std * 0.85): suggestions.append(("bad", 'Thumbnail may need stronger contrast or clearer subject separation.'))
+        thumb_sug.append(("bad", 'Thumbnail lacks a strong central focal point.'))
+        thumb_sug.append(("warn", 'Consider larger faces, objects, or bold text near the center.'))
+    if abs(left_focus - right_focus) > 0.15: thumb_sug.append(("warn", 'Visual attention appears uneven across the thumbnail.'))
+    if overall_focus < (focus_std * 0.85): thumb_sug.append(("bad", 'Thumbnail may need stronger contrast or clearer subject separation.'))
 
+    # ── PERFORMANCE INSIGHTS ───────────────────────────────────
     if actual_vpd is None:
-        if pred_vpd < 10_000: suggestions.append(("bad", 'Current packaging shows weak click-driving potential.'))
-        elif pred_vpd < 100_000: suggestions.append(("warn", 'Packaging has moderate potential but could be optimized further.'))
-        else: suggestions.append(("good", 'Packaging signals appear strong overall.'))
+        if pred_vpd < 10_000: perf_sug.append(("bad", 'Current packaging shows weak click-driving potential.'))
+        elif pred_vpd < 100_000: perf_sug.append(("warn", 'Packaging has moderate potential but could be optimized further.'))
+        else: perf_sug.append(("good", 'Packaging signals appear strong overall.'))
     else:
         ratio = pred_vpd / max(actual_vpd, 1)
         if ratio < 0.5:
-            suggestions.append(("good", 'Video significantly outperformed model expectations.'))
-            suggestions.append(("warn", 'Possible external virality factors: trends, audience momentum, or creator influence.'))
+            perf_sug.append(("good", 'Video significantly outperformed model expectations.'))
+            perf_sug.append(("warn", 'Possible external virality factors: trends, audience momentum, or creator influence.'))
         elif ratio > 2.0:
-            suggestions.append(("bad", 'Packaging appeared strong but audience response was weaker than expected.'))
-            suggestions.append(("warn", 'Possible mismatch between click appeal and viewer retention.'))
+            perf_sug.append(("bad", 'Packaging appeared strong but audience response was weaker than expected.'))
+            perf_sug.append(("warn", 'Possible mismatch between click appeal and viewer retention.'))
         else:
-            suggestions.append(("good", 'Prediction aligned closely with actual audience response.'))
+            perf_sug.append(("good", 'Prediction aligned closely with actual audience response.'))
 
-    unique = []
-    seen = set()
-    for level, text in suggestions:
-        if text not in seen:
-            unique.append((level, text))
-            seen.add(text)
-    return unique[:8]
+    # Deduplicate helper
+    def dedup(sugs):
+        unique, seen = [], set()
+        for level, text in sugs:
+            if text not in seen:
+                unique.append((level, text))
+                seen.add(text)
+        return unique
+
+    return {
+        "title": dedup(title_sug),
+        "thumbnail": dedup(thumb_sug),
+        "performance": dedup(perf_sug)
+    }
 
 # ─────────────────────────────────────────────
 # HELPERS
@@ -492,7 +505,7 @@ def run_prediction(model, tokenizer, device, title, pil_img):
     with torch.no_grad(): pred_norm = model(ids, mask, img_t).item()
     return ids, mask, img_t, float(np.expm1(pred_norm*TARGET_STD+TARGET_MEAN))
 
-def render_results(model, tokenizer, device, gradcam_obj, ids, mask, img_t, pil_img, pred_vpd, title, actual_vpd=None, video_info=None):
+def render_prediction_metrics(pred_vpd, actual_vpd=None, video_info=None):
     tier, tier_cls = get_tier(pred_vpd)
     sc             = get_score_cls(pred_vpd)
 
@@ -533,50 +546,72 @@ def render_results(model, tokenizer, device, gradcam_obj, ids, mask, img_t, pil_
         c7, c30 = st.columns(2)
         with c7:
             st.markdown(f"""<div class="metric-stack">
-                <div class="metric-stack-label">Est. views in 7 days</div>
+                <div class="metric-stack-label">Est. views (7 days)</div>
                 <div class="metric-stack-value">{fmt(pred_vpd*7)}</div>
             </div>""", unsafe_allow_html=True)
         with c30:
             st.markdown(f"""<div class="metric-stack">
-                <div class="metric-stack-label">Est. views in 30 days</div>
+                <div class="metric-stack-label">Est. views (30 days)</div>
                 <div class="metric-stack-value">{fmt(pred_vpd*30)}</div>
             </div>""", unsafe_allow_html=True)
 
     if video_info:
         st.markdown(f"""
-        <a href="{video_info['yt_url']}" target="_blank"
-           style="font-family:'JetBrains Mono',monospace;font-size:11px;
-                  color:#FFD600;text-decoration:none;letter-spacing:1px;">
-            ▶ WATCH ON YOUTUBE →</a>""", unsafe_allow_html=True)
+        <div style="text-align: center; margin-top: 10px;">
+            <a href="{video_info['yt_url']}" target="_blank" class="yt-btn">
+                ▶ WATCH ON YOUTUBE
+            </a>
+        </div>""", unsafe_allow_html=True)
 
-    st.markdown('<br><div class="section-header">EXPLAINABILITY</div>', unsafe_allow_html=True)
-    cam, _ = gradcam_obj.generate(ids, mask, img_t)
-    tab1, tab2 = st.tabs(['📸 Thumbnail · Grad-CAM', '📝 Title · Integrated Gradients'])
+def render_explainability(model, tokenizer, device, gradcam_obj, ids, mask, img_t, pil_img, pred_vpd, title, actual_vpd=None):
+    st.markdown('<br><br><div class="section-header">EXPLAINABILITY & AI INSIGHTS</div>', unsafe_allow_html=True)
     
-    with tab1:
+    # ── Charts ──
+    exp_c1, exp_c2 = st.columns(2, gap="large")
+    
+    with exp_c1:
+        st.markdown('<div class="exp-header img-header">📸 VISUAL FOCUS (Grad-CAM)</div>', unsafe_allow_html=True)
         with st.spinner('Generating Grad-CAM...'):
+            cam, _ = gradcam_obj.generate(ids, mask, img_t)
             fig_c = make_heatmap_fig(pil_img, cam)
-            st.pyplot(fig_c, use_container_width=True); plt.close(fig_c)
-        st.caption('Red/warm = regions the model weighted heavily.')
+            st.pyplot(fig_c, use_container_width=True)
+            plt.close(fig_c)
+        st.markdown('<p style="font-size:11px;color:#888;text-align:center;">Red/warm regions = visual elements the model found important.</p>', unsafe_allow_html=True)
         
-    with tab2:
+    with exp_c2:
+        st.markdown('<div class="exp-header txt-header">📝 TITLE SIGNAL (Integrated Gradients)</div>', unsafe_allow_html=True)
         with st.spinner('Running Integrated Gradients (~5s)...'):
             attr, tokens = integrated_gradients(model, tokenizer, ids, mask, img_t, device)
             pos_w, neg_w = top_tokens(attr, tokens)
-            ai_suggestions = generate_ai_suggestions(title, pred_vpd, pos_w, neg_w, cam, attr, tokens, actual_vpd)
             chips = "".join([f'<span class="insight-chip chip-pos">↑ {w}</span>' for w in pos_w] +
                             [f'<span class="insight-chip chip-neg">↓ {w}</span>' for w in neg_w])
-            st.markdown(chips, unsafe_allow_html=True)
-            st.markdown('<br><div class="section-header">AI OPTIMIZATION SUGGESTIONS</div>', unsafe_allow_html=True)
-            for level, text in ai_suggestions:
-                css_class = {"good": "suggestion-good", "warn": "suggestion-warn", "bad": "suggestion-bad"}.get(level, "suggestion-warn")
-                st.markdown(f'''<div class="suggestion-card {css_class}">{text}</div>''', unsafe_allow_html=True)
+            st.markdown(f'<div style="text-align:center;margin-bottom:10px;">{chips}</div>', unsafe_allow_html=True)
+            
             fig_ig = make_attr_fig(attr, tokens)
             if fig_ig:
                 st.pyplot(fig_ig, use_container_width=True)
                 plt.close(fig_ig)
-        st.caption('Green = pushed score up · Red = pushed score down')
+        st.markdown('<p style="font-size:11px;color:#888;text-align:center;">Green bars = positive impact · Red bars = negative impact</p>', unsafe_allow_html=True)
 
+    # ── Suggestions ──
+    st.markdown('<br><div class="section-header" style="margin-top:16px;">AI OPTIMIZATION SUGGESTIONS</div>', unsafe_allow_html=True)
+    grouped_suggestions = generate_ai_suggestions(title, pred_vpd, pos_w, neg_w, cam, attr, tokens, actual_vpd)
+    
+    sug_col1, sug_col2, sug_col3 = st.columns(3, gap="large")
+    
+    def render_suggestion_group(col, header_title, header_class, items):
+        with col:
+            st.markdown(f'<div class="exp-header {header_class}">{header_title}</div>', unsafe_allow_html=True)
+            if not items:
+                st.markdown('<div class="suggestion-card" style="color:#666; justify-content:center;">No specific insights.</div>', unsafe_allow_html=True)
+            for level, text in items:
+                css_class = {"good": "suggestion-good", "warn": "suggestion-warn", "bad": "suggestion-bad"}.get(level, "suggestion-warn")
+                st.markdown(f'<div class="suggestion-card {css_class}">{text}</div>', unsafe_allow_html=True)
+
+    render_suggestion_group(sug_col1, "📝 TITLE", "txt-header", grouped_suggestions['title'])
+    render_suggestion_group(sug_col2, "📸 THUMBNAIL", "img-header", grouped_suggestions['thumbnail'])
+    render_suggestion_group(sug_col3, "📊 PERFORMANCE", "perf-header", grouped_suggestions['performance'])
+    
 # ─────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────
@@ -618,20 +653,20 @@ if page == "Predictor":
             st.stop()
 
     render_predictor(
-        model=model, 
-        tokenizer=tokenizer, 
-        device=device, 
-        gradcam_obj=gradcam_obj, 
-        fetch_surprise_video=fetch_surprise_video, 
-        run_prediction=run_prediction, 
-        render_results=render_results, 
-        append_prediction=append_prediction, 
-        download_thumbnail=download_thumbnail, 
-        fmt=fmt, 
-        CATEGORIES=CATEGORIES, 
-        accuracy_info=accuracy_info
-    )
-
+            model=model, 
+            tokenizer=tokenizer, 
+            device=device, 
+            gradcam_obj=gradcam_obj, 
+            fetch_surprise_video=fetch_surprise_video, 
+            run_prediction=run_prediction, 
+            render_prediction_metrics=render_prediction_metrics, 
+            render_explainability=render_explainability, 
+            append_prediction=append_prediction, 
+            download_thumbnail=download_thumbnail, 
+            fmt=fmt, 
+            CATEGORIES=CATEGORIES, 
+            accuracy_info=accuracy_info
+        )
 elif page == "Accuracy Tracker":
     render_accuracy_tracker(load_log=load_log, fmt=fmt)
 
