@@ -197,7 +197,7 @@ class GradCAM:
 def make_heatmap_fig(pil_img, cam):
     w,h  = pil_img.size
     cr   = np.array(Image.fromarray(np.uint8(cam*255)).resize((w,h),Image.BILINEAR))/255.0
-    hm   = Image.fromarray(np.uint8(cm.get_cmap('jet')(cr)[:,:,:3]*255))
+    hm   = Image.fromarray(np.uint8(plt.colormaps['jet'](cr)[:, :, :3] * 255))
     bl   = Image.blend(pil_img.convert('RGB'),hm,0.5)
     fig,axes = plt.subplots(1,2,figsize=(10,4))
     fig.patch.set_facecolor('#111111')
